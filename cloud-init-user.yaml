@@ -1,0 +1,32 @@
+#cloud-config
+hostname: ${hostname}
+preserve_hostname: false
+fqdn: ${hostname}.local
+
+ssh_authorized_keys:
+  - ${ssh_key}
+
+ssh_pwauth: false
+
+users:
+  - name: root
+    passwd: '121'
+    lock_passwd: false
+
+bootcmd:
+  # Format only if it has no filesystem
+  - |
+    if ! blkid /dev/vdb; then
+      mkfs.ext4 -F /dev/vdb
+    fi
+  - mkdir -p /mnt/data
+  # Ensure fstab entry is not duplicated
+  - grep -q "/dev/vdb /mnt/data" /etc/fstab || echo "/dev/vdb /mnt/data ext4 defaults,nofail 0 2" >> /etc/fstab
+  - mount /mnt/data
+
+runcmd:
+  - mkdir -p /mnt/data/etc/earnapp
+  - mkdir -p /etc/earnapp
+  - rm -rf /etc/earnapp/*
+  - mount --bind /mnt/data/etc/earnapp /etc/earnapp
+  - grep -q "/mnt/data/etc/earnapp" /etc/fstab || echo "/mnt/data/etc/earnapp /etc/earnapp none bind 0 0" >> /etc/fstab

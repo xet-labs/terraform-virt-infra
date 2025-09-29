@@ -1,0 +1,37 @@
+# Terraform state files
+terraform.tfstate
+terraform.tfstate.*
+*.tfstate.backup
+
+# Crash logs
+crash.log
+
+# Terraform plan outputs
+*.tfplan
+
+# Sensitive override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Terraform provider lock file
+.terraform.lock.hcl
+
+# Terraform plugin directory
+.terraform/
+
+# Generated VM images / disks
+*.qcow2
+*.iso
+
+# OS/IDE's
+Thumbs.db
+.clj-kondo/
+.idea/
+.lsp/
+.vscode/
+.DS_Store
+*.swp

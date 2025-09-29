@@ -1,0 +1,28 @@
+#!/bin/bash
+set -e
+
+PREFIX="node"
+SSH_USER="root"  # or whichever user you use
+
+# Loop over all VMs with names starting with $PREFIX
+for vm in $(virsh list --name | grep "^$PREFIX"); do
+    echo "Processing $vm..."
+
+    # Run earnapp register and capture HTTP link
+    LINK=$(ssh "${SSH_USER}@${vm}.local" "earnapp stop; earnapp start; earnapp register" 2>/dev/null | grep -o 'http[s]\?://[^ ]\+')
+
+    if [[ -n "$LINK" ]]; then
+        echo "Opening link from $vm: $LINK"
+        # Open link using default browser
+        if command -v xdg-open >/dev/null; then
+            xdg-open "$LINK"
+        elif command -v open >/dev/null; then
+            open "$LINK"
+        else
+            echo "No command to open URL, please open manually: $LINK"
+        fi
+    else
+        echo "No link found from $vm"
+    fi
+    sleep 10
+done
