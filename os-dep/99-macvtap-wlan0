@@ -1,0 +1,27 @@
+#!/bin/bash
+# /etc/NetworkManager/dispatcher.d/99-macvtap-wlan0
+# Re-create macvtap interface when wlan0 reconnects
+
+IFACE="$1"
+STATUS="$2"
+
+# We only care about wlan0 going up
+if [[ "$IFACE" == "wlan0" && "$STATUS" == "up" ]]; then
+    echo "[dispatcher] wlan0 is up, recreating macvtap..." > /var/log/nmcli-macvlan.log
+
+    # Delete old macvtap (if any)
+    ip link del macvtap0 2>/dev/null
+
+    # Create macvtap interface bound to wlan0
+    ip link add link wlan0 name macvtap0 type macvtap mode bridge
+
+    # Bring it up
+    ip link set macvtap0 up
+
+    # Restart the libvirt interface to reattach VMs
+    virsh iface-bridge wlan0 macvtap0 2>/dev/null || true
+
+    echo "[dispatcher] macvtap0 re-created successfully." >> /var/log/nmcli-macvlan.log
+    exit
+fi
+    echo "[dispatcher] macvtap0 wasnt re-created" > /var/log/nmcli-macvlan.log

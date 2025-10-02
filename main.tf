@@ -11,107 +11,134 @@ provider "libvirt" {
   uri = "qemu:///system"
 }
 
-variable "vm_count" {
-  default = 3
+variable "vm_grp_count" {
+  default = 2
 }
 
 variable "ssh_public_key" {
   description = "Public SSH key to inject into all VMs"
   type        = string
-  default     = "" # well export data via terminal 
+  default     = ""
 }
 
-# Host-only network
-resource "libvirt_network" "hostonly" {
-  name      = "br-host0"
-  mode      = "none" # Creates an isolated network (host-only)
-  addresses = ["10.1.1.0/24"]
-  autostart = true
-
-  dhcp {
-    enabled = true
-  }
+# --- VM map: merge two groups ---
+locals {
+  vm_map = merge(
+    { for i in range(var.vm_grp_count) : "node${i + 1}" => {
+        memory   = 320
+        vcpu     = 2
+        net_name = "net-eth0"
+        pool = "default"
+      }
+    },
+    { for i in range(var.vm_grp_count, var.vm_grp_count * 2) : "node${i + 1}" => {
+        memory   = 320
+        vcpu     = 2
+        net_name = "net-wlan0"
+        pool = "default"
+      }
+    }
+  )
 }
 
-# Node-disk base
 resource "libvirt_volume" "disk_base" {
-  name   = "base-node"
+  name   = "node-base"
   source = "${path.module}/disk/base.qcow2"
   format = "qcow2"
 }
 
-# Node-Disk Root
 resource "libvirt_volume" "disk_root" {
-  count          = var.vm_count * 2
-  name           = "node${count.index + 1}-root.qcow2"
+  for_each       = local.vm_map
+  name           = "${each.key}-root.qcow2"
   base_volume_id = libvirt_volume.disk_base.id
   format         = "qcow2"
-  pool           = "default"
+  pool   = each.value.pool
 }
 
-# Node-disk Data
-resource "libvirt_volume" "disk_data" {
-  count  = var.vm_count * 2
-  name   = "node${count.index + 1}-data.qcow2"
-  size   = 5 * 1024 * 1024 * 1024 # 5GB data disk
-  format = "qcow2"
-  pool   = "default"
+# call external script per VM to check if data disk exists
+data "external" "disk_exists" {
+  for_each = local.vm_map
 
-  lifecycle {
-    prevent_destroy = true
+  program = [ "${path.module}/scripts/check_vol.sh" ]
+  query = {
+    name = "${each.key}-data.qcow2"
+    pool = each.value.pool
   }
 }
 
-# Cloud-init disk
-resource "libvirt_cloudinit_disk" "node_config" {
-  count = var.vm_count * 2
-  name  = "node${count.index + 1}-cloudinit.iso"
+# Create only the data volumes that do NOT already exist
+resource "libvirt_volume" "disk_data" {
+  for_each = {
+    for k, v in local.vm_map :
+    k => v if data.external.disk_exists[k].result.exists == "false"
+  }
 
-  user_data = templatefile("${path.module}/cloud-init-user.yaml", {
-    hostname = "node${count.index + 1}"
-    ssh_key  = var.ssh_public_key
-    instance_id  = "node${count.index + 1}"
+  name   = "${each.key}-data.qcow2"
+  size   = 5 * 1024 * 1024 * 1024
+  format = "qcow2"
+  pool   = each.value.pool
+
+  lifecycle {
+    # protect data volumes created by Terraform from accidental removal
+    prevent_destroy = true
+    ignore_changes  = [size]
+  }
+}
+
+# For volumes that already exist, expose them to Terraform via data source
+# (so we can attach their id)
+data "libvirt_volume" "disk_data_existing" {
+  for_each = {
+    for k, v in local.vm_map :
+    k => v if data.external.disk_exists[k].result.exists == "true"
+  }
+
+  # attributes used by provider: name & pool
+  name = "${each.key}-data.qcow2"
+  pool = each.value.pool
+}
+
+# --- Cloud-init disks ---
+resource "libvirt_cloudinit_disk" "node_config" {
+  for_each = local.vm_map
+
+  name = "${each.key}-cloudinit.iso"
+
+  user_data = templatefile("${path.module}/cloud-init/user.yaml", {
+    hostname    = each.key
+    ssh_key     = var.ssh_public_key
+    instance_id = each.key
+    memory      = each.value.memory
   })
 }
 
-# Create VMs
+# --- Domains / VMs ---
 resource "libvirt_domain" "node" {
-  count  = var.vm_count * 2
-  name   = "node${count.index + 1}"
-  vcpu   = 2
-  
-  memory {
-    dedicated = 170
-    floating  = 170 # set equal to dedicated to enable ballooning
-  }
+  for_each = local.vm_map
 
+  name   = each.key
+  memory = each.value.memory
+  vcpu   = each.value.vcpu
+
+  # root disk
   disk {
-    volume_id = element(libvirt_volume.disk_root.*.id, count.index) # root disk
+    volume_id = libvirt_volume.disk_root[each.key].id
   }
 
+  # persistent data disk
   disk {
-    volume_id = element(libvirt_volume.disk_data.*.id, count.index) # persistent disk
+    volume_id = data.external.disk_exists[each.key].result.exists == "true" ? data.libvirt_volume.disk_data_existing[each.key].id : libvirt_volume.disk_data[each.key].id
   }
-
   lifecycle {
-    ignore_changes = [
-      network_interface,
-      disk[1], # ignore changes to the second disk (persistent data)
-    ]
+    ignore_changes = [network_interface, disk[1]] # ignore changes to persistent disk & NIC
   }
 
-  dynamic "network_interface" {
-    for_each = [1]
-    content {
-      bridge  = count.index < var.vm_count ? "br0" : null
-      macvtap = count.index >= var.vm_count ? "wlan0" : null
-    }
-  }
-
-  # Attach host-only network for SSH/host access
   network_interface {
-    network_id = libvirt_network.hostonly.id
-    #wait_for_lease = true 
+    network_name = each.value.net_name
+  }
+
+  network_interface {
+    network_name = "default"
   }
 
   console {
@@ -120,11 +147,17 @@ resource "libvirt_domain" "node" {
     target_type = "serial"
   }
 
-  # Disable graphical interface for CLI-only mode [2]
   graphics {
     autoport    = false
     listen_type = "none"
   }
 
-  cloudinit = element(libvirt_cloudinit_disk.node_config.*.id, count.index)
+  cloudinit = libvirt_cloudinit_disk.node_config[each.key].id
+
+
+  depends_on = [
+    libvirt_volume.disk_root,
+    libvirt_volume.disk_data,
+    libvirt_cloudinit_disk.node_config,
+  ]
 }

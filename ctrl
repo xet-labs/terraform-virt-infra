@@ -1,0 +1,136 @@
+#!/bin/bash
+
+scriptPath="$(readlink -f ${BASH_SOURCE[0]:-$0})"
+scriptDir="$(dirname "${scriptPath}")";
+scriptName=${0##*/}
+source "/x/bin/sh/libxlvini"
+
+
+# Defaults
+PREFIX="node"
+PURGE=false
+SCRIPT=""
+TF_GRP_COUNT=3
+
+usage() {
+    echo "Usage: $0 [-p prefix] [-c command/script] [-x purge_all] [-n vm_count]"
+    echo "  -p prefix       : VM name prefix (default: node)"
+    echo "  -c command      : Command or script to run inside all matching VMs"
+    echo "  -x              : Purge all VMs including data disks"
+    echo "  -n vm_count     : Number of VMs (Terraform count variable, default: 3)"
+    exit 1
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        prefix|p) PREFIX="$2"; shift ;;
+        purge|x) PURGE=true ;;
+        script|c) SCRIPT="$2"; shift ;;
+        groupCount|n) TF_GRP_COUNT="$2"; shift ;;
+        plan) planSig=1 ;;
+        destroy) destroySig=1 ;;
+        apply) applySig=1 ;;
+        *) usage ;;
+    esac
+    shift
+done
+
+header(){
+    local scope=inf
+    sinf "Node prefix: ${NC}$PREFIX"
+    sinf "Node Group member: ${NC}$TF_GRP_COUNT"
+    [ -n "$SCRIPT" ] && sinf "Will execute script/command inside VMs"
+    echo ""
+}
+
+node_undefine() {
+    local scope
+    if [ "$PURGE" = true ]; then
+        swrn "Purging all VMs and disks '${PREFIX}*'..."
+        for vm in $(virsh list --all --name | grep -F "^$PREFIX" || true); do
+            [ -z "$vm" ] && continue
+            scope=$vm
+            sinf "Purging $vm.."
+            virsh undefine "$vm" --remove-all-storage || true
+        done
+    else
+        smsg "Undefining all VMs '${PREFIX}*'..."
+        for vm in $(virsh list --all --name | grep -F "^$PREFIX" || true); do
+            [ -z "$vm" ] && continue
+            scope=$vm
+            sinf "Undefining $vm.."
+            virsh undefine "$vm" || true
+        done
+    fi
+}
+
+node_stop() {
+    local nodeExists=0
+    local scope=node
+    for vm in $(virsh list --name | grep -F "^$PREFIX" || true); do
+        [ -z "$vm" ] && continue
+        [ "$nodeExists" -eq 0 ] && smsg "Stopping Nodes..."
+        scope=$vm
+        sinf "Shutting-down $vm.."
+        virsh shutdown "$vm" || true
+        nodeExists=1
+    done
+    [ "$nodeExists" -eq 1 ] && sleep 5
+    [ "$nodeExists" -eq 1 ] && node_undefine
+}
+
+tf_plan(){
+    local scope=Terraform
+    smsg "Plan.."
+    terraform plan || return 2
+}
+tf_destroy(){ 
+    local scope=Terraform
+    swrn "Destroy.."
+    terraform destroy -auto-approve || return 2
+}
+tf_apply(){ 
+    local scope=Terraform
+    smsg "Apply.."
+    terraform apply -auto-approve || return 2
+}
+
+tf_main(){
+    # Set Terraform variables
+    export TF_VAR_ssh_public_key="$(cat /x/.cred/ssh/o-mx-vm.pub)"
+    export TF_VAR_vm_grp_count="${TF_GRP_COUNT:-1}"
+    
+    set -e
+    
+    [ ${planSig:-0} -eq 1 ] && ( tf_plan || return )
+
+    [ ${destroySig:-0} -eq 1 ] && ( tf_destroy || return )
+ 
+    [ ${applySig:-0} -eq 1 ] && ( tf_apply || return )
+
+    # terraform apply -target=libvirt_domain.node -auto-approve
+}
+
+# Main
+header
+node_stop
+tf_main
+
+# Wait for VMs to come up and show IPs
+# sleep 20
+# for vm in $(virsh list --name | grep "^$PREFIX"); do
+#     echo "Waiting for IP of $vm..."
+#     until virsh domifaddr "$vm" >/dev/null 2>&1; do
+#         sleep 2
+#     done
+#     virsh domifaddr "$vm"
+
+#     # Run script/command if provided
+#     if [ -n "$SCRIPT" ]; then
+#         echo "Executing script inside $vm..."
+#         ssh root@"$vm" "$SCRIPT"
+#     fi
+# done
+
+echo "Done."

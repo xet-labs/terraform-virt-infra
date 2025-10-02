@@ -1,0 +1,11 @@
+<network>
+  <name>net-wlan0</name>
+  <forward mode='nat'>
+    <interface dev='wlan0'/>
+  </forward>
+  <ip address='10.0.2.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='10.0.2.100' end='10.0.2.200'/>
+    </dhcp>
+  </ip>
+</network>
